@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 #
-# Manage a single partition (info, read, write).
+# Manage the recovery partition (info, read, write).
 #
-# Copyright (C) 2015 Peter Wu <peter@lekensteyn.nl>
-# Licensed under the MIT license <http://opensource.org/licenses/MIT>.
+
 
 from __future__ import print_function
 from collections import OrderedDict
@@ -11,7 +10,7 @@ from contextlib import closing, contextmanager
 import argparse, logging, os, struct, sys
 import lglaf
 
-_logger = logging.getLogger("partitions")
+_logger = logging.getLogger("recovery")
 
 def human_readable(sz):
     suffixes = ('', 'Ki', 'Mi', 'Gi', 'Ti')
@@ -45,7 +44,7 @@ def get_partitions(comm):
             #    continue
             names.append((label, blockdev))
             _logger.debug(label+" = "+blockdev)
-    names.sort(key=lambda x: x[1])
+    names.sort(key=lambda x: x[0])
     #names.sort(key=lambda x: int(x[1].lstrip("mmcblk0p")))
     return OrderedDict(names)
 
@@ -71,6 +70,17 @@ def partition_info(comm, part_name):
 @contextmanager
 def laf_open_disk(comm):
     # Open whole disk in read/write mode
+    open_cmd = lglaf.make_request(b'OPEN', body=b'\0')
+    open_header = comm.call(open_cmd)[0]
+    fd_num = read_uint32(open_header, 4)
+    try:
+        yield fd_num
+    finally:
+        close_cmd = lglaf.make_request(b'CLSE', args=[fd_num])
+        comm.call(close_cmd)
+
+def laf_open_part(comm,):
+    # Open a partition in read/write mode
     open_cmd = lglaf.make_request(b'OPEN', body=b'\0')
     open_header = comm.call(open_cmd)[0]
     fd_num = read_uint32(open_header, 4)
@@ -128,15 +138,18 @@ def list_partitions(comm, part_filter=None):
     if part_filter:
         try: part_filter = find_partition(partitions, part_filter)[1]
         except ValueError: pass # No results is OK.
-    print("Number  StartSector    Size     Name")
+#    print("Number  StartSector    Size     Name")
+    print("Partition             Label")
+    print("---------------------------")
     for part_label, part_name in partitions.items():
         if part_filter and part_filter != part_name:
             continue
 #        part_num = int(part_name.lstrip('mmcblk0p'))
         part_num = part_name.lstrip('sd')
-        part_offset, part_size = partition_info(comm, part_name)
-        print("%4s    %10d  %10s  %s" % (part_num,
-            part_offset / BLOCK_SIZE, human_readable(part_size), part_label))
+        #part_offset, part_size = partition_info(comm, part_name)
+        #print("%4s    %10d  %10s  %s" % (part_num,
+        #    part_offset / BLOCK_SIZE, human_readable(part_size), part_label))
+        print("%-20s  %s" % (part_label, part_name))
 
 # On Linux, one bulk read returns at most 16 KiB. 32 bytes are part of the first
 # header, so remove one block size (512 bytes) to stay within that margin.
@@ -243,31 +256,35 @@ def main():
             level=logging.DEBUG if args.debug else logging.INFO)
 
     actions = (args.list, args.dump, args.restore, args.wipe)
-    if sum(1 if x else 0 for x in actions) != 1:
-        parser.error("Please specify one action from"
-        " --list / --dump / --restore / --wipe")
-    if not args.partition and (args.dump or args.restore or args.wipe):
-        parser.error("Please specify a partition")
+    #if sum(1 if x else 0 for x in actions) != 1:
+    #    parser.error("Please specify one action from"
+    #    " --list / --dump / --restore / --wipe")
+    #if not args.partition and (args.dump or args.restore or args.wipe):
+    #    parser.error("Please specify a partition")
 
     comm = lglaf.autodetect_device()
     with closing(comm):
         lglaf.do_kilo(comm)
         lglaf.try_hello(comm)
 
-        if args.list:
+        if sum(1 if x else 0 for x in actions) != 1:
             list_partitions(comm, args.partition)
             return
 
-        partitions = get_partitions(comm)
-        try:
-            part_label, part_name = find_partition(partitions, args.partition)
-        except ValueError as e:
-            parser.error(e)
+        #partitions = get_partitions(comm)
+        #try:
+        #    part_label, part_name = find_partition(partitions, args.partition)
+        #except ValueError as e:
+        #    parser.error(e)
 
-        part_offset, part_size = partition_info(comm, part_name)
-        _logger.debug("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
-                part_label, part_name, part_offset, part_offset, part_size, part_size)
-        with laf_open_disk(comm) as disk_fd:
+        part_label = "recovery"
+        part_name  = "sde2"
+        part_device= "/dev/sde2"
+        
+        #part_offset, part_size = partition_info(comm, part_name)
+        #_logger.debug("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
+        #        part_label, part_name, part_offset, part_offset, part_size, part_size)
+        with laf_open_part(comm,part_device) as disk_fd:
             _logger.debug("Opened fd %d for disk", disk_fd)
             if args.dump:
                 dump_partition(comm, disk_fd, args.dump, part_offset, part_size)

@@ -7,38 +7,59 @@
 
 from __future__ import print_function
 from contextlib import closing
+from Cryptodome.Cipher import AES
 import argparse, logging, re, struct, sys
 
 # Enhanced prompt with history
-try: import readline
-except ImportError: pass
-# Try USB interface
-try: import usb.core, usb.util
-except ImportError: pass
-# Windows registry for serial port detection
-try: import winreg
+try:
+    import readline
 except ImportError:
-    try: import _winreg as winreg
-    except ImportError: winreg = None
+    pass
 
+# Try USB interface
+try:
+    import usb.core, usb.util
+except ImportError:
+    pass
+
+# Windows registry for serial port detection
+try:
+    import winreg
+except ImportError:
+    try:
+        import _winreg as winreg
+    except ImportError:
+        winreg = None
+
+# Logging / Debug Output
 _logger = logging.getLogger("LGLAF.py")
 
 # Python 2/3 compat
-try: input = raw_input
-except: pass
-if '\0' == b'\0': int_as_byte = chr
-else: int_as_byte = lambda x: bytes([x])
+try:
+    input = raw_input
+except:
+    pass
+
+if '\0' == b'\0':
+    int_as_byte = chr
+else:
+    int_as_byte = lambda x: bytes([x])
 
 _ESCAPE_PATTERN = re.compile(b'''\\\\(
 x[0-9a-fA-F]{2} |
 [0-7]{1,3} |
 .)''', re.VERBOSE)
+
 _ESCAPE_MAP = {
     b'n': b'\n',
     b'r': b'\r',
     b't': b'\t',
 }
+
 _ESCAPED_CHARS = b'"\\\''
+
+### String Formatting
+
 def text_unescape(text):
     """Converts a string with escape sequences to bytes."""
     text_bin = text.encode("utf8")
@@ -63,7 +84,7 @@ def parse_number_or_escape(text):
     except ValueError:
         return text_unescape(text)
 
-### Protocol-related stuff
+### Packet helper functions
 
 def crc16(data):
     """CRC-16-CCITT computation with LSB-first and inversion."""
@@ -80,6 +101,8 @@ def crc16(data):
 def invert_dword(dword_bin):
     dword = struct.unpack("I", dword_bin)[0]
     return struct.pack("I", dword ^ 0xffffffff)
+
+### Packet creation, encoding, decoding
 
 def make_request(cmd, args=[], body=b''):
     if not isinstance(cmd, bytes):
@@ -125,12 +148,136 @@ def validate_message(payload, ignore_crc=False):
     if tail_exp != tail:
         raise RuntimeError("Expected trailer %r, found %r" % (tail_exp, tail))
 
+#
+### KILO CENT and KILO METR
+#
+def do_kilo(comm):
+    def key_transform(old_key):
+        new_key = ''
+        for x in range(32,0,-1):
+            new_key += chr(ord(old_key[x-1]) - (x % 0x0C))
+        return new_key
+    def key_xoring(key2_t, kilo_challenge):
+        key2_t_xor = ''
+        i = 0
+        while i <= 28:
+            key2_t_xor += chr(ord(key2_t[i]) ^ kilo_challenge[3])
+            key2_t_xor += chr(ord(key2_t[i+1]) ^ kilo_challenge[2])
+            key2_t_xor += chr(ord(key2_t[i+2]) ^ kilo_challenge[1])
+            key2_t_xor += chr(ord(key2_t[i+3]) ^ kilo_challenge[0])
+            i = i + 4
+        return key2_t_xor
+    def do_aes_encrypt(key2_t_xor):
+        plaintext = b''
+        for k in range(0,16):
+            plaintext += int_as_byte(k)
+        obj = AES.new(key2_t_xor.encode("latin-1"), AES.MODE_ECB)
+        return obj.encrypt(plaintext)
+
+    # It seems 'dqoev)ohnsWu\\bk`oiicmZ_lpqe\\ealp' is the correct key for the G6...  For a while.
+    # At some point, it won't work.  Then, 'qndiakxxuiemdklseqid~a~niq,zjuxl' will start working.
+    # Why?
+    KILO_KEY = 'qndiakxxuiemdklseqid~a~niq,zjuxl' # if this doesnt work try 'lgowvqnltpvtgogwswqn~n~mtjjjqxro'
+    # KILO_KEY = 'dqoev)ohnsWu\\bk`oiicmZ_lpqe\\ealp'
+
+    # KILO CENT - Initiate the handshake sequence
+    request_kilo = make_request(b'KILO', args=[b'CENT', b'\0\0\0\0', b'\0\0\0\0', b'\0\0\0\0'])
+    kilo_header, kilo_response = comm.call(request_kilo)
+    # TODO:  if kilo_header[0:7] != b'KILOCENT' : kys
+
+    # Extract challenge key ("arg3" + "arg4")
+    kilo_challenge = kilo_header[8:12]
+    chalstring = ":".join("{:02x}".format(k) for k in kilo_challenge)
+    _logger.debug("Challenge: %s" %chalstring)
+	
+    # KILO METR - Send the AES-encrypted challenge response
+    kilo_response = do_aes_encrypt(key_xoring(key_transform(KILO_KEY), kilo_challenge))
+    respstring = ":".join("{:02x}".format(m) for m in kilo_response)
+    _logger.debug("Response: %s" %respstring)
+    request_kilo_metr =  make_request(b'KILO', args=[b'METR', b'\0\0\0\0', b'\x02\0\0\0', b'\0\0\0\0'], body=bytes(kilo_response))
+    metr_header, metr_response = comm.call(request_kilo_metr)
+    # TODO:  if metr_header[0:7] != b'KILOMETR' : kys
+
+
+#
+### HELO
+#
+
+def try_hello(comm):
+    """
+    Tests whether the device speaks the expected protocol. If desynchronization
+    is detected, tries to read as much data as possible.
+    """
+    # HELLO version definitions
+    _HELLO_V1 = b'\1\0\0\1' # 0x01000001 : Original code
+    _HELLO_V3 = b'\3\0\0\1' # 0x01000003 : Some newer models
+    _HELLO_V5 = b'\5\0\0\1' # 0x01000005 : G6
+    _HELLO_VERSION_NEWEST = _HELLO_V5
+    
+    # Wait for at most 5 seconds for a response... it shouldn't take that long
+    # and otherwise something is wrong.
+    HELLO_READ_TIMEOUT = 5000
+
+    # Default to the newest version, but we will support any version (0x00000000 and up)
+    HELLO_VERSION = _HELLO_VERSION_NEWEST
+
+    ### Send HELO packet, wait for response, return the response
+    def send_hello(v):
+        hello_request = make_request(b'HELO', args=[v])
+        req_string = ":".join("{:02x}".format(k) for k in hello_request)
+        _logger.debug("HELLO Request : %s" %req_string)
+        comm.write(hello_request)
+        return hello_request
+    
+    ### Receive HELO response.  Return the remote version and remote min version
+    def get_hello_response():
+        def get_first_response():
+            data = comm.read(0x20, timeout=HELLO_READ_TIMEOUT)
+            cmd = data[0:4]
+            ver = data[4:8]
+            minver = data[8:12]
+            data_string = ":".join("{:02x}".format(k) for k in data)
+            _logger.debug("HELLO Response: %s" %data_string)
+            return cmd, ver, minver, data
+        cmd, ver, minver, data = get_first_response()
+        # Verify the packet
+        if cmd != b'HELO':
+            # Unexpected response, maybe some stale data from a previous execution?
+            _logger.debug("HELLO response was not as expected.  Validating and re-trying.")
+            while cmd != b'HELO':
+                try:
+                    validate_message(data, ignore_crc=True)
+                    size = struct.unpack_from('<I', data, 0x14)[0]
+                    comm.read(size, timeout=HELLO_READ_TIMEOUT)
+                except RuntimeError:
+                    pass
+                # Flush read buffer
+                comm.reset()
+                cmd, ver, minver, data = get_first_response()
+            # Just to be sure, send another HELO request.
+            send_hello(HELLO_VERSION)
+            cmd, ver, minver, data = get_first_response()
+        return ver, minver
+
+    # Create and send the HELO request using version HELLO_VERSION; wait for response
+    send_hello(HELLO_VERSION)
+    remote_ver, remote_minver = get_hello_response()
+
+    # Verify the versions match.  If not, use the remote version instead.
+    if remote_ver != HELLO_VERSION:
+        _logger.debug("HELLO version mismatch. Trying again with remote version: %s" %remote_ver)
+        send_hello(remote_ver)
+
+#
+### EXEC
+#
+    
 def make_exec_request(shell_command):
     # Allow use of shell constructs such as piping and reports syntax errors
     # such as unterminated quotes. Remaining limitation: repetitive spaces are
     # still eaten.
-    argv = b'sh -c eval\t"$*"</dev/null\t2>&1 -- '
-    argv += shell_command.encode('ascii')
+    #argv = b'sh -c eval\t"$*"</dev/null\t2>&1 -- '
+    argv = shell_command.encode('ascii')
     if len(argv) > 255:
         raise RuntimeError("Command length %d is larger than 255" % len(argv))
     return make_request(b'EXEC', body=argv + b'\0')
@@ -265,33 +412,6 @@ class USBCommunication(Communication):
     def close(self):
         usb.util.dispose_resources(self.usbdev)
 
-def try_hello(comm):
-    """
-    Tests whether the device speaks the expected protocol. If desynchronization
-    is detected, tries to read as much data as possible.
-    """
-    # Wait for at most 5 seconds for a response... it shouldn't take that long
-    # and otherwise something is wrong.
-    HELLO_READ_TIMEOUT = 5000
-
-    hello_request = make_request(b'HELO', args=[b'\1\0\0\1'])
-    comm.write(hello_request)
-    data = comm.read(0x20, timeout=HELLO_READ_TIMEOUT)
-    if data[0:4] != b'HELO':
-        # Unexpected response, maybe some stale data from a previous execution?
-        while data[0:4] != b'HELO':
-            try:
-                validate_message(data, ignore_crc=True)
-                size = struct.unpack_from('<I', data, 0x14)[0]
-                comm.read(size, timeout=HELLO_READ_TIMEOUT)
-            except RuntimeError: pass
-            # Flush read buffer
-            comm.reset()
-            data = comm.read(0x20, timeout=HELLO_READ_TIMEOUT)
-        # Just to be sure, send another HELO request.
-        comm.call(hello_request)
-
-
 def detect_serial_path():
     try:
         path = r'HARDWARE\DEVICEMAP\SERIALCOMM'
@@ -362,6 +482,8 @@ def command_to_payload(command):
 parser = argparse.ArgumentParser(description='LG LAF Download Mode utility')
 parser.add_argument("--skip-hello", action="store_true",
         help="Immediately send commands, skip HELO message")
+parser.add_argument("--kilo", action="store_true",
+		help="Perform KILO authentication sequence")
 parser.add_argument("-c", "--command", help='Shell command to execute')
 parser.add_argument("--serial", metavar="PATH", dest="serial_path",
         help="Path to serial device (e.g. COM4).")
@@ -373,8 +495,10 @@ def main():
             level=logging.DEBUG if args.debug else logging.INFO)
 
     # Binary stdout (output data from device as-is)
-    try: stdout_bin = sys.stdout.buffer
-    except: stdout_bin = sys.stdout
+    try:
+        stdout_bin = sys.stdout.buffer
+    except:
+        stdout_bin = sys.stdout
 
     if args.serial_path:
         comm = FileCommunication(args.serial_path)
@@ -382,9 +506,12 @@ def main():
         comm = autodetect_device()
 
     with closing(comm):
+        if args.kilo:
+            do_kilo(comm)
+            _logger.debug("KILO sequence complete")
         if not args.skip_hello:
             try_hello(comm)
-            _logger.debug("Hello done, proceeding with commands")
+            _logger.debug("HELO sequence complete")
         for command in get_commands(args.command):
             try:
                 payload = command_to_payload(command)
