@@ -10,6 +10,14 @@ from contextlib import closing, contextmanager
 import argparse, logging, os, struct, sys
 import lglaf
 
+
+_RECOVERY_LABEL  = "recovery"
+_RECOVERY_SLICE  = "/dev/block/sde2"
+_RECOVERY_SLICE_NAME = "sde2"
+_RECOVERY_DISK   = "/dev/block/sde"
+_RECOVERY_START  = 41967616 # Block 81968 * 512
+_RECOVERY_SIZE   = 42467328 # Block 82944 * 512
+
 _logger = logging.getLogger("recovery")
 
 def human_readable(sz):
@@ -58,30 +66,20 @@ def find_partition(partitions, query):
 
 def partition_info(comm, part_name):
     """Retrieves the partition size and offset within the disk (in bytes)."""
-    disk_path = "/sys/class/block/%s" % part_name
+    #disk_path = "/sys/class/block/%s" % part_name
     try:
         # Convert sector sizes to bytes.
-        output = cat_file(comm, '{0}/start {0}/size'.format(disk_path)).split()
+        #output = cat_file(comm, '{0}/start {0}/size'.format(disk_path)).split()
+        output=81968,82944
         start, size = (512 * int(x) for x in output)
     except ValueError:
         raise RuntimeError("Partition %s not found" % part_name)
     return start, size
 
 @contextmanager
-def laf_open_disk(comm):
+def laf_open_disk(comm, disk):
     # Open whole disk in read/write mode
-    open_cmd = lglaf.make_request(b'OPEN', body=b'\0')
-    open_header = comm.call(open_cmd)[0]
-    fd_num = read_uint32(open_header, 4)
-    try:
-        yield fd_num
-    finally:
-        close_cmd = lglaf.make_request(b'CLSE', args=[fd_num])
-        comm.call(close_cmd)
-
-def laf_open_part(comm,):
-    # Open a partition in read/write mode
-    open_cmd = lglaf.make_request(b'OPEN', body=b'\0')
+    open_cmd = lglaf.make_request(b'OPEN', body=disk)
     open_header = comm.call(open_cmd)[0]
     fd_num = read_uint32(open_header, 4)
     try:
@@ -267,9 +265,9 @@ def main():
         lglaf.do_kilo(comm)
         lglaf.try_hello(comm)
 
-        if sum(1 if x else 0 for x in actions) != 1:
-            list_partitions(comm, args.partition)
-            return
+        #if sum(1 if x else 0 for x in actions) != 1:
+            #list_partitions(comm, args.partition)
+            #return
 
         #partitions = get_partitions(comm)
         #try:
@@ -277,21 +275,30 @@ def main():
         #except ValueError as e:
         #    parser.error(e)
 
-        part_label = "recovery"
-        part_name  = "sde2"
-        part_device= "/dev/sde2"
+        part_label  = _RECOVERY_LABEL
+        part_name   = _RECOVERY_SLICE_NAME
+        part_offset = _RECOVERY_START
+        part_size   = _RECOVERY_SIZE
+        part_disk   = _RECOVERY_DISK
         
         #part_offset, part_size = partition_info(comm, part_name)
-        #_logger.debug("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
-        #        part_label, part_name, part_offset, part_offset, part_size, part_size)
-        with laf_open_part(comm,part_device) as disk_fd:
+        
+        _logger.debug("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
+                part_label, part_name, part_offset, part_offset, part_size, part_size)
+        
+        if sum(1 if x else 0 for x in actions) != 1:
+            print("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
+                  part_label, part_name, part_offset, part_offset, part_size, part_size)
+            return
+        
+        with laf_open_disk(comm, part_disk) as disk_fd:
             _logger.debug("Opened fd %d for disk", disk_fd)
             if args.dump:
                 dump_partition(comm, disk_fd, args.dump, part_offset, part_size)
-            elif args.restore:
-                write_partition(comm, disk_fd, args.restore, part_offset, part_size)
-            elif args.wipe:
-                wipe_partition(comm, disk_fd, part_offset, part_size)
+            #elif args.restore:
+            #    write_partition(comm, disk_fd, args.restore, part_offset, part_size)
+            #elif args.wipe:
+            #    wipe_partition(comm, disk_fd, part_offset, part_size)
 
 if __name__ == '__main__':
     try:
