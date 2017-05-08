@@ -30,61 +30,17 @@ def human_readable(sz):
 def read_uint32(data, offset):
     return struct.unpack_from('<I', data, offset)[0]
 
-def cat_file(comm, path):
-    shell_command = b'cat ' + path.encode('ascii') + b'\0'
-    return comm.call(lglaf.make_request(b'EXEC', body=shell_command))[1]
-
-def get_partitions(comm):
-    """
-    Maps partition labels (such as "recovery") to block devices (such as
-    "mmcblk0p0"), sorted by the number in the block device.
-    """
-    name_cmd = 'ls -l /dev/block/bootdevice/by-name'
-    output = comm.call(lglaf.make_exec_request(name_cmd))[1]
-    output = output.strip().decode('ascii')
-    names = []
-    for line in output.strip().split("\n"):
-        if (line.split()[-2:][0] != "total"):
-            label, arrow, path = line.split()[-3:]
-            assert arrow == '->', "Expected arrow in ls output"
-            blockdev = path.split('/')[-1]
-            #if not blockdev.startswith('mmcblk0p'):
-            #    continue
-            names.append((label, blockdev))
-            _logger.debug(label+" = "+blockdev)
-    names.sort(key=lambda x: x[0])
-    #names.sort(key=lambda x: int(x[1].lstrip("mmcblk0p")))
-    return OrderedDict(names)
-
-def find_partition(partitions, query):
-    try: query = "mmcblk0p%d" % int(query)
-    except ValueError: pass
-    for part_label, part_name in partitions.items():
-        if query in (part_label, part_name):
-            return part_label, part_name
-    raise ValueError("Partition not found: %s" % query)
-
-def partition_info(comm, part_name):
-    """Retrieves the partition size and offset within the disk (in bytes)."""
-    #disk_path = "/sys/class/block/%s" % part_name
-    try:
-        # Convert sector sizes to bytes.
-        #output = cat_file(comm, '{0}/start {0}/size'.format(disk_path)).split()
-        output=81968,82944
-        start, size = (512 * int(x) for x in output)
-    except ValueError:
-        raise RuntimeError("Partition %s not found" % part_name)
-    return start, size
-
 @contextmanager
-def laf_open_disk(comm, disk):
+def laf_open_disk(comm, disk_path):
     # Open whole disk in read/write mode
-    open_cmd = lglaf.make_request(b'OPEN', body=disk)
+    open_cmd = lglaf.make_request(b'OPEN', body=disk_path.encode('ascii') + b'\0')
+    _logger.debug("Sending OPEN for %s" %disk_path)
     open_header = comm.call(open_cmd)[0]
     fd_num = read_uint32(open_header, 4)
     try:
         yield fd_num
     finally:
+        _logger.debug("Sending CLSE for %i" % fd_num)
         close_cmd = lglaf.make_request(b'CLSE', args=[fd_num])
         comm.call(close_cmd)
 
@@ -131,24 +87,6 @@ def open_local_readable(path):
     else:
         return open(path, "rb")
 
-def list_partitions(comm, part_filter=None):
-    partitions = get_partitions(comm)
-    if part_filter:
-        try: part_filter = find_partition(partitions, part_filter)[1]
-        except ValueError: pass # No results is OK.
-#    print("Number  StartSector    Size     Name")
-    print("Partition             Label")
-    print("---------------------------")
-    for part_label, part_name in partitions.items():
-        if part_filter and part_filter != part_name:
-            continue
-#        part_num = int(part_name.lstrip('mmcblk0p'))
-        part_num = part_name.lstrip('sd')
-        #part_offset, part_size = partition_info(comm, part_name)
-        #print("%4s    %10d  %10s  %s" % (part_num,
-        #    part_offset / BLOCK_SIZE, human_readable(part_size), part_label))
-        print("%-20s  %s" % (part_label, part_name))
-
 # On Linux, one bulk read returns at most 16 KiB. 32 bytes are part of the first
 # header, so remove one block size (512 bytes) to stay within that margin.
 # This ensures that whenever the USB communication gets out of sync, it will
@@ -161,9 +99,9 @@ def dump_partition(comm, disk_fd, local_path, part_offset, part_size):
     read_offset = BLOCK_SIZE * (part_offset // BLOCK_SIZE)
     end_offset = part_offset + part_size
     unaligned_bytes = part_offset % BLOCK_SIZE
-    _logger.debug("Will read %d bytes at disk offset %d", part_size, part_offset)
+    _logger.debug("Will read %d bytes at disk offset %d" %(part_size, part_offset))
     if unaligned_bytes:
-        _logger.debug("Unaligned read, read will start at %d", read_offset)
+        _logger.debug("Unaligned read, read will start at %d" %(read_offset))
 
     with open_local_writable(local_path) as f:
         # Offset should be aligned to block size. If not, read at most a
@@ -236,44 +174,24 @@ def wipe_partition(comm, disk_fd, part_offset, part_size):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--debug", action='store_true', help="Enable debug messages")
-parser.add_argument("--list", action='store_true',
-        help='List available partitions')
 parser.add_argument("--dump", metavar="LOCAL_PATH",
-        help="Dump partition to file ('-' for stdout)")
+        help="Dump recovery partition to file ('-' for stdout)")
 parser.add_argument("--restore", metavar="LOCAL_PATH",
-        help="Write file to partition on device ('-' for stdin)")
+        help="Write file to recovery partition on device ('-' for stdin)")
 parser.add_argument("--wipe", action='store_true',
         help="TRIMs a partition")
-parser.add_argument("partition", nargs='?',
-        help="Partition number (e.g. 1 for block device mmcblk0p1)"
-        " or partition name (e.g. 'recovery')")
 
 def main():
     args = parser.parse_args()
     logging.basicConfig(format='%(asctime)s %(name)s: %(levelname)s: %(message)s',
             level=logging.DEBUG if args.debug else logging.INFO)
 
-    actions = (args.list, args.dump, args.restore, args.wipe)
-    #if sum(1 if x else 0 for x in actions) != 1:
-    #    parser.error("Please specify one action from"
-    #    " --list / --dump / --restore / --wipe")
-    #if not args.partition and (args.dump or args.restore or args.wipe):
-    #    parser.error("Please specify a partition")
+    actions = (args.dump, args.restore, args.wipe)
 
     comm = lglaf.autodetect_device()
     with closing(comm):
         lglaf.do_kilo(comm)
         lglaf.try_hello(comm)
-
-        #if sum(1 if x else 0 for x in actions) != 1:
-            #list_partitions(comm, args.partition)
-            #return
-
-        #partitions = get_partitions(comm)
-        #try:
-        #    part_label, part_name = find_partition(partitions, args.partition)
-        #except ValueError as e:
-        #    parser.error(e)
 
         part_label  = _RECOVERY_LABEL
         part_name   = _RECOVERY_SLICE_NAME
@@ -281,18 +199,16 @@ def main():
         part_size   = _RECOVERY_SIZE
         part_disk   = _RECOVERY_DISK
         
-        #part_offset, part_size = partition_info(comm, part_name)
-        
-        _logger.debug("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
-                part_label, part_name, part_offset, part_offset, part_size, part_size)
+        _logger.debug("Partition %s (%s) on disk %s at offset %d (%#x) size %d (%#x)"
+                %(part_label, part_name, part_disk, part_offset, part_offset, part_size, part_size))
         
         if sum(1 if x else 0 for x in actions) != 1:
-            print("Partition %s (%s) at offset %d (%#x) size %d (%#x)",
-                  part_label, part_name, part_offset, part_offset, part_size, part_size)
+            print("Partition %s (%s) on disk %s at offset %d (%#x) size %d (%#x)"
+                  %(part_label, part_name, part_disk, part_offset, part_offset, part_size, part_size))
             return
         
         with laf_open_disk(comm, part_disk) as disk_fd:
-            _logger.debug("Opened fd %d for disk", disk_fd)
+            _logger.debug("Opened fd %d for disk %s" %(disk_fd, part_disk))
             if args.dump:
                 dump_partition(comm, disk_fd, args.dump, part_offset, part_size)
             #elif args.restore:
