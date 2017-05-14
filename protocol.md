@@ -184,6 +184,30 @@ Unknown.
 ### DIFF
 Unknown.
 
+### SIGN
+Arguments: none
+
+Request body: 82,448 bytes of binary data.
+
+The following was observed in the SIGN body while flashing a KDZ to a G6 using LGUP:
+
+- The first 16 bytes appear to be a command, or possibly options or attributes?
+	- Example:  `99:07:43:53:00:10:00:00  3d:01:00:00:00:01:00:00`
+- The next 256 bytes are possibly a public key?
+- The next 256 bytes are all set to `0xff`
+- The next 25,360 bytes "touch" some partitions.  The partitions touched, in order, were:
+			`PrimaryGPT, laf, lafbak, misc, factory, rct, persist, system (56 times), cache (16 times), userdata (194 times), BackupGPT, PrimaryGPT, xbl, xblbak, BackupGPT, PrimaryGPT, xbl2, xbl2bak, BackupGPT, PrimaryGPT, BackupGPT, PrimaryGPT, boot, recovery, recoverybak, tz, tzbak, aboot, abootbak, raw_resources, raw_resourcesbak, rpm, rpmbak, hyp, hypbak, pmic, pmicbak, devcfg, devcfgbak, modem, sec, keymaster, keymasterbak, cmnlib, cmnlibbak, cmnlib64, cmnlib64bak, apdp, msadp, BackupGPT, PrimaryGPT, BackupGPT, PrimaryGPT, BackupGPT`
+	- These 25,360 bytes consist of 317 iterations of a particular 80-byte sequence:
+		- Bytes 1 - 32 are the partition name and padding with trailing bytes set to 0x00.  The last four bytes are all 0xff
+		 - Example:
+													`73:79:73:74:65:6d:00:00  00:00:00:00:00:00:00:00`
+													`00:00:00:00:00:00:00:00  00:00:00:00:ff:ff:ff:ff`
+		- The next 8 bytes and the following 8 bytes appear to be some kind of identifier, flags, or attributes.  They tend to contain 1 to 3 bytes each of data, and are 0x00-padded.
+		Example:  `de:af:02:00:00:00:00:00  aa:7c:00:00:00:00:00:00`
+		- The final 32 bytes "do something."  Maybe a digest hash?
+		Example:	`53:dd:90:1c:50:c1:ea:16  43:4d:38:c6:49:ca:39:4c`
+											`83:b1:38:95:c5:9f:3c:06  fc:a7:ac:54:d3:ac:c9:58`
+
 ## USB layer
 The LG Windows driver (via `LGMobileDriver_WHQL_Ver_4.0.3.exe`) exposes two
 serial ports, `LGANDNETMDM0` and `LGANDNETDIAG1`. The `LGANDNETDIAG1` port is
