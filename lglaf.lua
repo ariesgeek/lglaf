@@ -102,4 +102,5 @@ function lglaf.init()
     usb_product:add(0x1004633e, lglaf) -- LG G3 (D855) or LG V10 (H962)
     usb_product:add(0x1004627f, lglaf) -- LG G3 (VS985)
     usb_product:add(0x10046298, lglaf) -- LG G4 (VS986)
+    usb_product:add(0x1004633a, lglaf) -- LG G6 (H872)
 end
