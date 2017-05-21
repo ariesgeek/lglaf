@@ -88,6 +88,7 @@ Arguments:
  - arg1: File descriptor (See `OPEN`).
  - arg2: Starting offset in **512-byte blocks**.
    > **Note:**  When writing a partition, `/sys/block/sdX/sdXN/start` refers to the **sector** offset, expressed in bytes of size `/sys/block/sde/queue/logical_block_size`, which is probably 4096.
+   
    > **Example:** On the H872, `recovery` is mounted to `sde2`.  `/sys/block/sde/sde2/start` shows a value of `81962` for this partition's start sector.  To begin writing at this point, `arg2` would need to be `(81962 / 8) = 10246`, or `0x2806`, or `\x06\x28\0\0`.
  - arg3: None. (`\0\0\0\0`)
  - arg4: Continuation Type:
