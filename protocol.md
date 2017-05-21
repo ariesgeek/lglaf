@@ -78,17 +78,39 @@ LG Flash DLL waits 5000 milliseconds after this command.
 ### WRTE - Write File
 Writes to a file descriptor.
 
+Arguments:  See Request and Response below.
+
+Request body: the data to be written.
+
+#### Request
+
 Arguments:
- - arg1: file descriptor (must be open for writing!)
- - arg2 (request): offset in **blocks** (multiple of 512 bytes).
- - arg2 (response): offset in **bytes**.
-Request body: the data to be written. Can be of any size (including 1 or 513).
+ - arg1: File descriptor (See `OPEN`).
+ - arg2: Starting offset in **512-byte blocks**.
+   > **Note:**  When writing a partition, `/sys/block/sdX/sdXN/start` refers to the **sector** offset, expressed in bytes of size `/sys/block/sde/queue/logical_block_size`, which is probably 4096.
+   > **Example:** On the H872, `recovery` is mounted to `sde2`.  `/sys/block/sde/sde2/start` shows a value of `81962` for this partition's start sector.  To begin writing at this point, `arg2` would need to be `(81962 / 8) = 10246`, or `0x2806`, or `\x06\x28\0\0`.
+ - arg3: None. (`\0\0\0\0`)
+ - arg4: Continuation Type:
+   - **`0x38` (`\x38\0\0\0`):** This is not a continuation of a previous `WRTE` and there will not be a continuation of this `WRTE`.  In other words, this is the only `WRTE` for this particular file / partition / other data chunk.
+   - **`0x18` (`\x18\0\0\0`):** This is not a continuation of a previous `WRTE` and there will be a continuation of this `WRTE`.  In other words, this is first in a series of `WRTE` commands for a single file / partition / other data chunk.
+   - **`0x09` (`\x09\0\0\0`):** This is a continuation of a previous `WRTE` and there will be a continuation of this `WRTE`.  In other words, this is neither the first nor is it the last in a series of `WRTE` commands for a single file / partition / other data chunk.
+   - **`0x29` (`\x29\0\0\0`):** This is a continuation of a previous `WRTE` and there will not be a continuation of this `WRTE`.  In other words, this is last in a series of `WRTE` commands for a single file / partition / other data chunk.
 
-Note: writing to a file descriptor which was opened for reading results in FAIL
-with code 0x82000002. This command is likely used for writing to partitions.
+#### Body length
 
-Integer overflow in the response offset is ignored. That is, the block offset
-30736384 (0x1d50000) is 0x3aa000000 bytes, but will appear as 0xaa000000.
+Note that, when inspecting a packet capture of a `WRTE` operation, the `len` portion of the LAF header for a `WRTE` where the value of `arg4` is `0x18` will be larger than the actual packet itself.  The `len` portion of the header refers to the total amount of data that is to be written, and this will, in this case, be split over several packets.  Thus, a `WRTE` response will not be received, nor will it be expected, until the entire `len` bytes has been writen.
+
+#### Response
+
+Writing to a file descriptor which was opened for reading results in FAIL with code 0x82000002.
+
+Note:  Integer overflow in the response offset is ignored. That is, the block offset 30736384 (0x1d50000) is 0x3aa000000 bytes, but will appear as 0xaa000000.
+
+Arguments:
+ - arg1: File descriptor sent with request.
+ - arg2: Starting offset, as `arg2` of the request, in **bytes**.  Assuming a logical sector size of 4096, `arg2 / 4096` should equal the value of `arg2` that was sent with the request.
+ - arg3: Unsure?  This has always been observed sending a value of `0x08` or `\x08\0\0\0`.
+ - arg4: `0x01` (`\x01\0\0\0`) if the request was a continuation, `0x00` (`\0\0\0\0`) if not.  See `arg4` of the request for details.
 
 ### READ - Read File
 Reads from a file descriptor.
